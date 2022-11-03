@@ -1,4 +1,4 @@
-use crate::{Config, Quote, YahooFinanceQuote, Message as YahooProtobufMessage, QuoteMessage};
+use crate::{Config, Message as YahooProtobufMessage, Quote, QuoteMessage, YahooFinanceQuote};
 use anyhow::anyhow;
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
@@ -15,10 +15,7 @@ pub struct QuoteProducer {
 
 impl QuoteProducer {
     pub fn new(config: Config, tx: Sender<QuoteMessage>) -> Self {
-        QuoteProducer {
-            config,
-            tx
-        }
+        QuoteProducer { config, tx }
     }
 
     async fn create_websocket(&self) -> anyhow::Result<()> {
@@ -28,35 +25,45 @@ impl QuoteProducer {
 
         let (mut write, read) = ws_stream.split();
 
-        let symbols = self.config.portfolio.iter().map(|(symbol, _p)| symbol.as_str()).chain(["USDINR=X"]).map(|symbol| format!("\"{}\"", symbol)).join(", ");
+        let symbols = self
+            .config
+            .portfolio
+            .iter()
+            .map(|(symbol, _p)| symbol.as_str())
+            .chain(["USDEUR=X"])
+            .map(|symbol| format!("\"{}\"", symbol))
+            .join(", ");
 
         let subscription_message = format!("{{\"subscribe\":[{}]}}", symbols);
 
-        write.send(YahooProtobufMessage::from(subscription_message)).await?;
+        write
+            .send(YahooProtobufMessage::from(subscription_message))
+            .await?;
 
         let tx = self.tx.clone();
 
-        read.map_err(|e| anyhow!(e)).try_for_each(|message| async {
-            async {
+        read.map_err(|e| anyhow!(e))
+            .try_for_each(|message| async {
                 async {
-                    let data = message.into_text()?;
-                    let result = base64::decode(date)?;
-                    let finance_quote = YahooFinanceQuote::parse_from_bytes(&result)?;
+                    async {
+                        let data = message.into_text()?;
+                        let result = base64::decode(data)?;
+                        let finance_quote = YahooFinanceQuote::parse_from_bytes(&result)?;
 
-                    if !finance_quote.get_id().is_empty() {
-                        let quote = Quote::from(finance_quote);
-                        info!(?quote, "Got quote");
+                        if !finance_quote.get_id().is_empty() {
+                            let quote = Quote::from(finance_quote);
+                            info!(?quote, "Got quote");
 
-                        tx.send(vec![quote]).await?;
+                            tx.send(vec![quote]).await?;
+                        }
+
+                        Ok::<(), anyhow::Error>(())
                     }
-
-                    Ok::<(), anyhow::Error>(())
+                    .await
                 }
                 .await
-            }
+            })
             .await
-        })
-        .await
     }
 
     #[instrument(skip(self))]

@@ -12,11 +12,8 @@ pub struct QuoteReceiver {
 
 impl QuoteReceiver {
     pub fn new(config: Config, rx: Receiver<QuoteMessage>) -> Self {
-        QuoteReceiver {
-            config, 
-            rx, 
-            db,
-        }
+        let db = config.db.as_ref().map(|x| InfluxDB::new(x.clone()));
+        QuoteReceiver { config, rx, db }
     }
 
     fn report(&self, portfolio: &Portfolio, s: &str) {
@@ -26,10 +23,15 @@ impl QuoteReceiver {
 
             let pl = portfolio.daily_pl();
             let nw = portfolio.market_value();
-            println!("Daily P/L: {} ({}%), Market Value: {} ({})", 
-                pl.map(|pl| format!("{:+.0}", pl)).unwrap_or_else(|| "?".into()),
-                pl.zip(nw).map(|(pl, nw)| format!("{:+.2}", pl / nw * 100.)).unwrap_or_else(|| "?".into()),
-                nw.map(|pl| format!("{:.0}", pl)).unwrap_or_else(|| "?".into()),
+            println!(
+                "Daily P/L: {} ({}%), Market Value: {} ({})",
+                pl.map(|pl| format!("{:+.0}", pl))
+                    .unwrap_or_else(|| "?".into()),
+                pl.zip(nw)
+                    .map(|(pl, nw)| format!("{:+.2}", pl / nw * 100.))
+                    .unwrap_or_else(|| "?".into()),
+                nw.map(|pl| format!("{:.0}", pl))
+                    .unwrap_or_else(|| "?".into()),
                 s
             )
         }
@@ -37,14 +39,25 @@ impl QuoteReceiver {
 
     async fn initialize_portfolio(&self) -> anyhow::Result<Portfolio> {
         let (quotes, metas): (Vec<Quote>, Vec<QuoteMeta>) = Yahoo::get_quotes(
-            self.config.portfolio.iter().map(|(symbol, _pos)| symbol.as_str()).collect_vec(),
-        ).await?.into_iter().unzip();
+            self.config
+                .portfolio
+                .iter()
+                .map(|(symbol, _pos)| symbol.as_str())
+                .collect_vec(),
+        )
+        .await?
+        .into_iter()
+        .unzip();
 
-        let (fx_quotes, fx_metas): (Vec<Quote>, Vec<QuoteMeta>) = Yahoo::get_quotes(vec!["INRUSD=X"]).await?.into_iter().unzip();
+        let (fx_quotes, fx_metas): (Vec<Quote>, Vec<QuoteMeta>) =
+            Yahoo::get_quotes(vec!["EURUSD=X"])
+                .await?
+                .into_iter()
+                .unzip();
 
         let mut portfolio = Portfolio::new(self.config.home_currency, fx_metas);
 
-        for (quote_eta, (symbol, position)) in metas.iter().zip_eq(self.config.portfolio.iter()) {
+        for (quote_meta, (symbol, position)) in metas.iter().zip_eq(self.config.portfolio.iter()) {
             assert_eq!(quote_meta.symbol, *symbol);
 
             portfolio.add_position(quote_meta.clone(), *position);
@@ -54,12 +67,17 @@ impl QuoteReceiver {
             portfolio.update(quote);
         }
 
-        self.push_measurements(quotes.iter().map_into().collect_vec(), &portfolio).await?;
+        self.push_measurements(quotes.iter().map_into().collect_vec(), &portfolio)
+            .await?;
 
         Ok(portfolio)
     }
 
-    async fn push_measurements(&self, mut measurements: Vec<Measurement>, portfolio: &Portfolio) -> anyhow::Result<()> {
+    async fn push_measurements(
+        &self,
+        mut measurements: Vec<Measurement>,
+        portfolio: &Portfolio,
+    ) -> anyhow::Result<()> {
         if let Some(db) = &self.db {
             let now = Utc::now();
 
@@ -81,12 +99,12 @@ impl QuoteReceiver {
 
             db.push(measurements).await?
         }
-        
+
         Ok(())
     }
 
     #[instrument(skip(self))]
-    pub async fn statr(&mut self) -> anyhow::Result<()> {
+    pub async fn start(&mut self) -> anyhow::Result<()> {
         let mut portfolio = self.initialize_portfolio().await?;
 
         self.report(&portfolio, "Quotes received");
@@ -99,12 +117,20 @@ impl QuoteReceiver {
                     info!(?quote, "Quote updated");
                 }
 
-                self.report(&portfolio, format!("Quote {} updated", quotes.iter().map(|x| x.symbol.as_str()).join(", ")).as_str());
+                self.report(
+                    &portfolio,
+                    format!(
+                        "Quote {} updated",
+                        quotes.iter().map(|x| x.symbol.as_str()).join(", ")
+                    )
+                    .as_str(),
+                );
 
-                self.push_measurements(quotes.iter().map_into().collect_vec(), &portfolio).await
+                self.push_measurements(quotes.iter().map_into().collect_vec(), &portfolio)
+                    .await
             }
             .await?
-        } 
+        }
 
         Ok::<(), anyhow::Error>(())
     }
